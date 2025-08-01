@@ -35,6 +35,12 @@ class OV7670: public I2SCamera
   public:
   OV7670(OV7670::Mode m, const int SIOD, const int SIOC, const int VSYNC, const int HREF, const int XCLK, const int PCLK, const int D0, const int D1, const int D2, const int D3, const int D4, const int D5, const int D6, const int D7);
 
+  // 曝光控制方法
+  void setManualExposure(uint8_t exposure);
+  void enableAEC();
+  void setExposureLevel(int level);
+  void setNightMode(bool enable);
+  void setBrightness(int brightness);
 
 //camera registers
   static const int REG_GAIN = 0x00;
@@ -55,7 +61,7 @@ class OV7670: public I2SCamera
     static const int COM8_BFILT = 0x20;    // Band filter enable
     static const int COM8_AGC = 0x04;    // Auto gain enable
     static const int COM8_AWB = 0x02;    // White balance enable
-    static const int COM8_AEC = 0x0;
+    static const int COM8_AEC = 0x01;    // 修正為0x01，原本是0x0
   static const int REG_COM9 = 0x14;
   static const int REG_COM10 = 0x15;
   static const int REG_COM14 = 0x3E;
@@ -105,4 +111,3 @@ class OV7670: public I2SCamera
   static const int ADCCTR0 = 0x20;
 
 };
-

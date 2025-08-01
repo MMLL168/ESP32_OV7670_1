@@ -46,6 +46,11 @@ const unsigned long wifiCheckInterval = 5000; // 每5秒檢查一次WiFi狀態
 // 相機初始化重試
 const int maxCameraInitRetries = 5;
 
+// 相機設置
+int currentExposureLevel = 0; // 默認曝光級別 (範圍: -2 到 +2)
+int currentBrightness = 0;    // 默認亮度級別 (範圍: -2 到 +2)
+bool isNightModeEnabled = false; // 默認夜間模式關閉
+
 void setup() 
 {
   Serial.begin(115200);
@@ -118,7 +123,13 @@ void setup()
   server.on("/capture", HTTP_GET, handleCapture);
   server.on("/stream", HTTP_GET, handleStream);
   server.on("/setInterval", HTTP_GET, handleSetInterval);
-  server.on("/check", HTTP_GET, handleConnectionCheck); // 添加連接檢查端點
+  server.on("/check", HTTP_GET, handleConnectionCheck);
+  
+  // 添加相機曝光設置路由
+  server.on("/setExposure", HTTP_GET, handleSetExposure);
+  server.on("/setBrightness", HTTP_GET, handleSetBrightness);
+  server.on("/setNightMode", HTTP_GET, handleSetNightMode);
+  
   server.onNotFound(handleNotFound);
   
   // 啟動HTTP服務器
@@ -126,6 +137,9 @@ void setup()
   Serial.println("HTTP server started");
   
   lastWiFiStatus = WiFi.status() == WL_CONNECTED;
+  
+  // 設置默認的曝光級別
+  camera->setExposureLevel(currentExposureLevel);
 }
 
 void loop() {
@@ -205,6 +219,75 @@ void handleConnectionCheck() {
   server.send(200, "text/plain; charset=utf-8", "connected");
 }
 
+// 處理設置曝光級別的請求
+void handleSetExposure() {
+  if (server.hasArg("level")) {
+    String level = server.arg("level");
+    currentExposureLevel = level.toInt();
+    
+    // 限制曝光級別範圍在 -2 到 +2 之間
+    if (currentExposureLevel < -2) currentExposureLevel = -2;
+    if (currentExposureLevel > 2) currentExposureLevel = 2;
+    
+    // 應用曝光設置
+    camera->setExposureLevel(currentExposureLevel);
+    
+    server.send(200, "text/plain; charset=utf-8", "Exposure level set to " + String(currentExposureLevel));
+    Serial.println("Exposure level set to " + String(currentExposureLevel));
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Missing level parameter");
+  }
+}
+
+// 處理設置亮度的請求
+void handleSetBrightness() {
+  if (server.hasArg("level")) {
+    String level = server.arg("level");
+    currentBrightness = level.toInt();
+    
+    // 限制亮度範圍在 -2 到 +2 之間
+    if (currentBrightness < -2) currentBrightness = -2;
+    if (currentBrightness > 2) currentBrightness = 2;
+    
+    // 應用亮度設置
+    camera->setBrightness(currentBrightness);
+    
+    server.send(200, "text/plain; charset=utf-8", "Brightness set to " + String(currentBrightness));
+    Serial.println("Brightness set to " + String(currentBrightness));
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Missing level parameter");
+  }
+}
+
+// 處理設置夜間模式的請求
+void handleSetNightMode() {
+  if (server.hasArg("enable")) {
+    String enable = server.arg("enable");
+    isNightModeEnabled = (enable == "1" || enable == "true" || enable == "on");
+    
+    // 應用夜間模式設置
+    camera->setNightMode(isNightModeEnabled);
+    
+    server.send(200, "text/plain; charset=utf-8", "Night mode " + String(isNightModeEnabled ? "enabled" : "disabled"));
+    Serial.println("Night mode " + String(isNightModeEnabled ? "enabled" : "disabled"));
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Missing enable parameter");
+  }
+}
+
+// 處理設置幀率間隔的請求
+void handleSetInterval() {
+  if (server.hasArg("ms")) {
+    String ms = server.arg("ms");
+    frameInterval = ms.toInt();
+    if (frameInterval < 50) frameInterval = 50; // 最小50ms (20 FPS)
+    if (frameInterval > 2000) frameInterval = 2000; // 最大2000ms (0.5 FPS)
+    server.send(200, "text/plain; charset=utf-8", "Interval set to " + String(frameInterval) + "ms");
+  } else {
+    server.send(400, "text/plain; charset=utf-8", "Missing ms parameter");
+  }
+}
+
 // 處理根路徑請求，返回一個HTML頁面
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
@@ -225,6 +308,21 @@ void handleRoot() {
   html += "button:hover { background-color: #45a049; }";
   html += "button.fullscreen { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.5); }";
   html += "a { display: inline-block; background-color: #f0f0f0; padding: 8px 16px; border-radius: 4px; text-decoration: none; color: #333; }";
+  html += ".slider-container { display: flex; align-items: center; justify-content: center; margin: 10px 0; }";
+  html += ".slider-container label { width: 120px; text-align: right; margin-right: 10px; }";
+  html += ".slider-container input[type='range'] { flex: 1; max-width: 200px; }";
+  html += ".slider-container span { width: 30px; text-align: left; margin-left: 10px; }";
+  html += ".switch { position: relative; display: inline-block; width: 60px; height: 34px; }";
+  html += ".switch input { opacity: 0; width: 0; height: 0; }";
+  html += ".slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 34px; }";
+  html += ".slider:before { position: absolute; content: \"\"; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }";
+  html += "input:checked + .slider { background-color: #2196F3; }";
+  html += "input:checked + .slider:before { transform: translateX(26px); }";
+  html += ".tabs { display: flex; margin-bottom: 15px; }";
+  html += ".tab { padding: 10px 20px; cursor: pointer; background-color: #f0f0f0; border-radius: 5px 5px 0 0; }";
+  html += ".tab.active { background-color: white; border-bottom: 2px solid #4CAF50; }";
+  html += ".tab-content { display: none; }";
+  html += ".tab-content.active { display: block; }";
   html += "</style>";
   html += "</head><body>";
   html += "<div class='container'>";
@@ -235,6 +333,14 @@ void handleRoot() {
   html += "<img id='streamImage' src='/stream' alt='Camera Stream' style='max-width:100%;'>";
   html += "<button class='fullscreen' onclick='toggleFullscreen()'>全屏</button>";
   html += "</div>";
+  
+  html += "<div class='tabs'>";
+  html += "<div class='tab active' onclick='openTab(event, \"basicSettings\")'>基本設置</div>";
+  html += "<div class='tab' onclick='openTab(event, \"exposureSettings\")'>曝光設置</div>";
+  html += "</div>";
+  
+  // 基本設置標籤頁
+  html += "<div id='basicSettings' class='tab-content active'>";
   
   html += "<div class='control-group'>";
   html += "<label for='imageSize'>圖像大小: </label>";
@@ -258,9 +364,97 @@ void handleRoot() {
   html += "<a href='/capture' target='_blank'>下載單張圖片</a>";
   html += "</div>";
   
+  html += "</div>"; // 基本設置標籤頁結束
+  
+  // 曝光設置標籤頁
+  html += "<div id='exposureSettings' class='tab-content'>";
+  
+  html += "<div class='control-group'>";
+  html += "<div class='slider-container'>";
+  html += "<label for='exposure'>曝光級別: </label>";
+  html += "<input type='range' id='exposure' min='-2' max='2' value='" + String(currentExposureLevel) + "' oninput='updateExposureValue()'>";
+  html += "<span id='exposureValue'>" + String(currentExposureLevel) + "</span>";
+  html += "</div>";
+  html += "<button onclick='applyExposure()'>應用曝光設置</button>";
+  html += "</div>";
+  
+  html += "<div class='control-group'>";
+  html += "<div class='slider-container'>";
+  html += "<label for='brightness'>亮度級別: </label>";
+  html += "<input type='range' id='brightness' min='-2' max='2' value='" + String(currentBrightness) + "' oninput='updateBrightnessValue()'>";
+  html += "<span id='brightnessValue'>" + String(currentBrightness) + "</span>";
+  html += "</div>";
+  html += "<button onclick='applyBrightness()'>應用亮度設置</button>";
+  html += "</div>";
+  
+  html += "<div class='control-group'>";
+  html += "<label for='nightMode'>夜間模式: </label>";
+  html += "<label class='switch'>";
+  html += "<input type='checkbox' id='nightMode' " + String(isNightModeEnabled ? "checked" : "") + ">";
+  html += "<span class='slider'></span>";
+  html += "</label>";
+  html += "<button onclick='applyNightMode()' style='margin-left: 10px;'>應用夜間模式</button>";
+  html += "</div>";
+  
+  html += "</div>"; // 曝光設置標籤頁結束
+  
   html += "</div>"; // 容器結束
   
   html += "<script>";
+  
+  // 標籤頁切換
+  html += "function openTab(evt, tabName) {";
+  html += "  var i, tabContent, tabLinks;";
+  html += "  tabContent = document.getElementsByClassName('tab-content');";
+  html += "  for (i = 0; i < tabContent.length; i++) {";
+  html += "    tabContent[i].className = tabContent[i].className.replace(' active', '');";
+  html += "  }";
+  html += "  tabLinks = document.getElementsByClassName('tab');";
+  html += "  for (i = 0; i < tabLinks.length; i++) {";
+  html += "    tabLinks[i].className = tabLinks[i].className.replace(' active', '');";
+  html += "  }";
+  html += "  document.getElementById(tabName).className += ' active';";
+  html += "  evt.currentTarget.className += ' active';";
+  html += "}";
+  
+  // 更新曝光值顯示
+  html += "function updateExposureValue() {";
+  html += "  var exposure = document.getElementById('exposure').value;";
+  html += "  document.getElementById('exposureValue').textContent = exposure;";
+  html += "}";
+  
+  // 更新亮度值顯示
+  html += "function updateBrightnessValue() {";
+  html += "  var brightness = document.getElementById('brightness').value;";
+  html += "  document.getElementById('brightnessValue').textContent = brightness;";
+  html += "}";
+  
+  // 應用曝光設置
+  html += "function applyExposure() {";
+  html += "  var exposure = document.getElementById('exposure').value;";
+  html += "  fetch('/setExposure?level=' + exposure)";
+  html += "    .then(response => response.text())";
+  html += "    .then(data => alert('曝光級別已設置為 ' + exposure))";
+  html += "    .catch(error => console.error('Error:', error));";
+  html += "}";
+  
+  // 應用亮度設置
+  html += "function applyBrightness() {";
+  html += "  var brightness = document.getElementById('brightness').value;";
+  html += "  fetch('/setBrightness?level=' + brightness)";
+  html += "    .then(response => response.text())";
+  html += "    .then(data => alert('亮度已設置為 ' + brightness))";
+  html += "    .catch(error => console.error('Error:', error));";
+  html += "}";
+  
+  // 應用夜間模式
+  html += "function applyNightMode() {";
+  html += "  var nightMode = document.getElementById('nightMode').checked ? 1 : 0;";
+  html += "  fetch('/setNightMode?enable=' + nightMode)";
+  html += "    .then(response => response.text())";
+  html += "    .then(data => alert('夜間模式已' + (nightMode ? '啟用' : '禁用')))";
+  html += "    .catch(error => console.error('Error:', error));";
+  html += "}";
   
   // 更新大小顯示值
   html += "var sizeSlider = document.getElementById('imageSize');";
@@ -371,19 +565,6 @@ void handleRoot() {
   html += "</body></html>";
   
   server.send(200, "text/html; charset=utf-8", html);
-}
-
-// 處理設置幀率間隔的請求
-void handleSetInterval() {
-  if (server.hasArg("ms")) {
-    String ms = server.arg("ms");
-    frameInterval = ms.toInt();
-    if (frameInterval < 50) frameInterval = 50; // 最小50ms (20 FPS)
-    if (frameInterval > 2000) frameInterval = 2000; // 最大2000ms (0.5 FPS)
-    server.send(200, "text/plain; charset=utf-8", "Interval set to " + String(frameInterval) + "ms");
-  } else {
-    server.send(400, "text/plain; charset=utf-8", "Missing ms parameter");
-  }
 }
 
 // 處理圖像捕獲請求
