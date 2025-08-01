@@ -62,12 +62,27 @@ void setup()
     Serial.printf("Initializing camera, attempt %d/%d\n", retryCount + 1, maxCameraInitRetries);
     
     try {
-      // 使用較低的XCLK頻率
+      // 手動設置XCLK引腳
+      pinMode(XCLK, OUTPUT);
+      digitalWrite(XCLK, LOW);
+      
+      // 使用標準方式初始化相機，不指定XCLK頻率參數
       camera = new OV7670(OV7670::Mode::QQVGA_RGB565, SIOD, SIOC, VSYNC, HREF, XCLK, PCLK, D0, D1, D2, D3, D4, D5, D6, D7);
+      
       cameraInitialized = true;
       Serial.println("Camera initialized successfully");
+    } catch (const std::exception& e) {
+      Serial.print("Camera initialization failed with exception: ");
+      Serial.println(e.what());
+      // 如果相機已經被創建，刪除它
+      if (camera != nullptr) {
+        delete camera;
+        camera = nullptr;
+      }
+      retryCount++;
+      delay(1000); // 等待1秒後重試
     } catch (...) {
-      Serial.println("Camera initialization failed, retrying...");
+      Serial.println("Camera initialization failed with unknown exception, retrying...");
       // 如果相機已經被創建，刪除它
       if (camera != nullptr) {
         delete camera;
@@ -193,64 +208,125 @@ void handleConnectionCheck() {
 // 處理根路徑請求，返回一個HTML頁面
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head>";
-  html += "<meta charset=\"UTF-8\">";  // 添加UTF-8字符編碼
-  html += "<title>ESP32 Camera</title>";
+  html += "<meta charset=\"UTF-8\">";
+  html += "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">";
+  html += "<title>ESP32 Camera Server</title>";
   html += "<style>";
-  html += "body { font-family: Arial, sans-serif; margin: 20px; text-align: center; }";
-  html += "h1 { color: #333366; }";
-  html += "img { border: 2px solid #cccccc; border-radius: 5px; max-width: 100%; }";
-  html += "select, button { margin: 10px; padding: 5px; }";
-  html += ".container { max-width: 800px; margin: 0 auto; }";
-  html += "#statusMessage { color: red; display: none; margin: 10px 0; }";
+  html += "body { font-family: Arial, sans-serif; margin: 20px; text-align: center; background-color: #f5f5f5; }";
+  html += "h1 { color: #333366; margin-bottom: 20px; }";
+  html += ".camera-container { margin: 0 auto; max-width: 95%; position: relative; }";
+  html += "#streamImage { border: 2px solid #cccccc; border-radius: 5px; }";
+  html += "select, button { margin: 10px; padding: 8px 12px; border-radius: 4px; border: 1px solid #ccc; }";
+  html += "input[type='range'] { width: 200px; vertical-align: middle; }";
+  html += ".container { max-width: 800px; margin: 0 auto; padding: 20px; background-color: white; border-radius: 10px; box-shadow: 0 0 10px rgba(0,0,0,0.1); }";
+  html += "#statusMessage { color: red; display: none; margin: 10px 0; font-weight: bold; }";
+  html += ".control-group { margin: 15px 0; }";
+  html += "button { background-color: #4CAF50; color: white; cursor: pointer; border: none; }";
+  html += "button:hover { background-color: #45a049; }";
+  html += "button.fullscreen { position: absolute; top: 10px; right: 10px; background: rgba(0,0,0,0.5); }";
+  html += "a { display: inline-block; background-color: #f0f0f0; padding: 8px 16px; border-radius: 4px; text-decoration: none; color: #333; }";
   html += "</style>";
   html += "</head><body>";
   html += "<div class='container'>";
   html += "<h1>ESP32 Camera Server</h1>";
   html += "<div id='statusMessage'>連接已中斷，正在嘗試重新連接...</div>";
-  html += "<div><img id='streamImage' src='/stream' style='max-width:100%;'></div>";
-  html += "<p>幀率設置: ";
+  
+  html += "<div class='camera-container'>";
+  html += "<img id='streamImage' src='/stream' alt='Camera Stream' style='max-width:100%;'>";
+  html += "<button class='fullscreen' onclick='toggleFullscreen()'>全屏</button>";
+  html += "</div>";
+  
+  html += "<div class='control-group'>";
+  html += "<label for='imageSize'>圖像大小: </label>";
+  html += "<span id='sizeValue'>100%</span><br>";
+  html += "<input type='range' id='imageSize' min='10' max='200' value='100' style='margin:10px 0;'>";
+  html += "<button onclick='applySize()'>應用大小</button>";
+  html += "</div>";
+  
+  html += "<div class='control-group'>";
+  html += "<label for='frameRate'>幀率設置: </label>";
   html += "<select id='frameRate' onchange='updateFrameRate()'>";
   html += "<option value='1000'>1 FPS (每秒1幀)</option>";
   html += "<option value='500'>2 FPS (每秒2幀)</option>";
   html += "<option value='200'>5 FPS (每秒5幀)</option>";
   html += "<option value='100' selected>10 FPS (每秒10幀)</option>";
   html += "<option value='50'>20 FPS (每秒20幀)</option>";
-  html += "</select></p>";
-  html += "<p><a href='/capture' target='_blank'>下載單張圖片</a></p>";
+  html += "</select>";
   html += "</div>";
   
+  html += "<div class='control-group'>";
+  html += "<a href='/capture' target='_blank'>下載單張圖片</a>";
+  html += "</div>";
+  
+  html += "</div>"; // 容器結束
+  
   html += "<script>";
+  
+  // 更新大小顯示值
+  html += "var sizeSlider = document.getElementById('imageSize');";
+  html += "var sizeValue = document.getElementById('sizeValue');";
+  html += "sizeSlider.oninput = function() {";
+  html += "  sizeValue.textContent = this.value + '%';";
+  html += "};";
+  
+  // 應用大小按鈕
+  html += "function applySize() {";
+  html += "  var size = document.getElementById('imageSize').value;";
+  html += "  var img = document.getElementById('streamImage');";
+  html += "  img.style.width = size + '%';";
+  html += "  localStorage.setItem('cameraSize', size);";
+  html += "  alert('圖像大小已設置為 ' + size + '%');";
+  html += "}";
+  
+  // 幀率更新
   html += "function updateFrameRate() {";
-  html += "  const interval = document.getElementById('frameRate').value;";
+  html += "  var interval = document.getElementById('frameRate').value;";
   html += "  fetch('/setInterval?ms=' + interval)";
   html += "    .then(response => response.text())";
   html += "    .then(data => console.log(data))";
   html += "    .catch(error => console.error('Error:', error));";
   html += "}";
   
-  // 添加連接監控和自動重連功能
-  html += "let connectionLost = false;";
-  html += "let reconnectAttempts = 0;";
-  html += "const maxReconnectAttempts = 10;";
-  html += "const statusMessage = document.getElementById('statusMessage');";
-  html += "const streamImage = document.getElementById('streamImage');";
+  // 全屏切換
+  html += "function toggleFullscreen() {";
+  html += "  var container = document.querySelector('.camera-container');";
+  html += "  if (!document.fullscreenElement) {";
+  html += "    if (container.requestFullscreen) {";
+  html += "      container.requestFullscreen();";
+  html += "    } else if (container.webkitRequestFullscreen) {";
+  html += "      container.webkitRequestFullscreen();";
+  html += "    } else if (container.msRequestFullscreen) {";
+  html += "      container.msRequestFullscreen();";
+  html += "    }";
+  html += "  } else {";
+  html += "    if (document.exitFullscreen) {";
+  html += "      document.exitFullscreen();";
+  html += "    } else if (document.webkitExitFullscreen) {";
+  html += "      document.webkitExitFullscreen();";
+  html += "    } else if (document.msExitFullscreen) {";
+  html += "      document.msExitFullscreen();";
+  html += "    }";
+  html += "  }";
+  html += "}";
+  
+  // 連接監控
+  html += "var connectionLost = false;";
+  html += "var reconnectAttempts = 0;";
+  html += "var maxReconnectAttempts = 10;";
+  html += "var statusMessage = document.getElementById('statusMessage');";
+  html += "var streamImage = document.getElementById('streamImage');";
   
   html += "function checkConnection() {";
   html += "  fetch('/check?' + new Date().getTime())";
   html += "    .then(response => {";
-  html += "      if (response.ok) {";
-  html += "        if (connectionLost) {";
-  html += "          console.log('Connection restored');";
-  html += "          connectionLost = false;";
-  html += "          statusMessage.style.display = 'none';";
-  html += "          reconnectAttempts = 0;";
-  html += "          // 重新載入串流";
-  html += "          streamImage.src = '/stream?' + new Date().getTime();";
-  html += "        }";
+  html += "      if (response.ok && connectionLost) {";
+  html += "        connectionLost = false;";
+  html += "        statusMessage.style.display = 'none';";
+  html += "        reconnectAttempts = 0;";
+  html += "        streamImage.src = '/stream?' + new Date().getTime();";
   html += "      }";
   html += "    })";
   html += "    .catch(error => {";
-  html += "      console.error('Connection check failed:', error);";
   html += "      if (!connectionLost) {";
   html += "        connectionLost = true;";
   html += "        statusMessage.style.display = 'block';";
@@ -265,14 +341,13 @@ void handleRoot() {
   html += "    return;";
   html += "  }";
   html += "  reconnectAttempts++;";
-  html += "  statusMessage.textContent = `連接已中斷，正在嘗試重新連接... (${reconnectAttempts}/${maxReconnectAttempts})`;";
-  html += "  setTimeout(() => {";
+  html += "  statusMessage.textContent = '連接已中斷，正在嘗試重新連接... (' + reconnectAttempts + '/' + maxReconnectAttempts + ')';";
+  html += "  setTimeout(function() {";
   html += "    streamImage.src = '/stream?' + new Date().getTime();";
   html += "    checkConnection();";
   html += "  }, 2000);";
   html += "}";
   
-  html += "// 監聽串流加載錯誤";
   html += "streamImage.onerror = function() {";
   html += "  if (!connectionLost) {";
   html += "    connectionLost = true;";
@@ -281,12 +356,21 @@ void handleRoot() {
   html += "  }";
   html += "};";
   
-  html += "// 定期檢查連接";
-  html += "setInterval(checkConnection, 5000);";
+  // 頁面加載時恢復設置
+  html += "window.onload = function() {";
+  html += "  var savedSize = localStorage.getItem('cameraSize');";
+  html += "  if (savedSize) {";
+  html += "    document.getElementById('imageSize').value = savedSize;";
+  html += "    document.getElementById('sizeValue').textContent = savedSize + '%';";
+  html += "    document.getElementById('streamImage').style.width = savedSize + '%';";
+  html += "  }";
+  html += "  setInterval(checkConnection, 5000);";
+  html += "};";
   
   html += "</script>";
   html += "</body></html>";
-  server.send(200, "text/html; charset=utf-8", html);  // 設置正確的Content-Type
+  
+  server.send(200, "text/html; charset=utf-8", html);
 }
 
 // 處理設置幀率間隔的請求
