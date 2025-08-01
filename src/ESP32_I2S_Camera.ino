@@ -152,7 +152,7 @@ void loop() {
     streamMJPEG();
   }
   
-  delay(10);
+  delay(5);
 }
 
 // 連接到WiFi
@@ -280,7 +280,7 @@ void handleSetInterval() {
   if (server.hasArg("ms")) {
     String ms = server.arg("ms");
     frameInterval = ms.toInt();
-    if (frameInterval < 50) frameInterval = 50; // 最小50ms (20 FPS)
+    if (frameInterval < 20) frameInterval = 20; // 最小20ms (50 FPS)
     if (frameInterval > 2000) frameInterval = 2000; // 最大2000ms (0.5 FPS)
     server.send(200, "text/plain; charset=utf-8", "Interval set to " + String(frameInterval) + "ms");
   } else {
@@ -352,11 +352,32 @@ void handleRoot() {
   html += "<div class='control-group'>";
   html += "<label for='frameRate'>幀率設置: </label>";
   html += "<select id='frameRate' onchange='updateFrameRate()'>";
+  html += "<option value='2000'>0.5 FPS (每秒0.5幀)</option>";
   html += "<option value='1000'>1 FPS (每秒1幀)</option>";
+  html += "<option value='667'>1.5 FPS (每秒1.5幀)</option>";
   html += "<option value='500'>2 FPS (每秒2幀)</option>";
+  html += "<option value='333'>3 FPS (每秒3幀)</option>";
+  html += "<option value='250'>4 FPS (每秒4幀)</option>";
   html += "<option value='200'>5 FPS (每秒5幀)</option>";
+  html += "<option value='167'>6 FPS (每秒6幀)</option>";
+  html += "<option value='143'>7 FPS (每秒7幀)</option>";
+  html += "<option value='125'>8 FPS (每秒8幀)</option>";
+  html += "<option value='111'>9 FPS (每秒9幀)</option>";
   html += "<option value='100' selected>10 FPS (每秒10幀)</option>";
+  html += "<option value='91'>11 FPS (每秒11幀)</option>";
+  html += "<option value='83'>12 FPS (每秒12幀)</option>";
+  html += "<option value='77'>13 FPS (每秒13幀)</option>";
+  html += "<option value='71'>14 FPS (每秒14幀)</option>";
+  html += "<option value='67'>15 FPS (每秒15幀)</option>";
+  html += "<option value='63'>16 FPS (每秒16幀)</option>";
+  html += "<option value='59'>17 FPS (每秒17幀)</option>";
+  html += "<option value='56'>18 FPS (每秒18幀)</option>";
+  html += "<option value='53'>19 FPS (每秒19幀)</option>";
   html += "<option value='50'>20 FPS (每秒20幀)</option>";
+  html += "<option value='40'>25 FPS (每秒25幀)</option>";
+  html += "<option value='33'>30 FPS (每秒30幀)</option>";
+  html += "<option value='25'>40 FPS (每秒40幀)</option>";
+  html += "<option value='20'>50 FPS (每秒50幀)</option>";
   html += "</select>";
   html += "</div>";
   

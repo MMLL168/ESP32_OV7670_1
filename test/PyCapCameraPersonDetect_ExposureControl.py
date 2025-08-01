@@ -32,6 +32,7 @@ person_count = 0
 last_detection_time = time.time()
 detection_timeout = 1.0  # 1秒內不重複計數
 detection_active = True  # 控制是否進行偵測
+detection_enabled = True  # 控制是否啟用辨識功能
 detection_mode = 0  # 0: HOG, 1: 人臉
 mode_names = ["HOG Detection", "Face Detection"]
 min_weight_threshold = 0.10  # 進一步降低權重閾值以提高靈敏度
@@ -47,6 +48,8 @@ exposure_control_available = False  # 標記曝光控制是否可用
 # 顏色設定 (BGR格式)
 GREEN = (0, 255, 0)       # 綠色框框
 TEXT_COLOR = (0, 255, 0)  # 綠色文字
+FPS_COLOR = (0, 165, 255) # 橙色文字，用於FPS顯示
+ALERT_COLOR = (0, 0, 255) # 紅色文字，用於提示信息
 
 # 偵測設定
 detect_padding = (16, 16)  # 增加填充以捕獲更多可能的人體
@@ -54,6 +57,13 @@ detect_scale_factor = 1.01  # 進一步減小以檢測更多人體
 face_scale_factor = 1.1
 face_min_neighbors = 3
 face_min_size = (30, 30)
+
+# FPS計算相關變數
+frame_times = []
+fps_update_interval = 0.5  # 每0.5秒更新一次FPS
+last_fps_update = time.time()
+current_fps = 0
+processing_fps = 0  # 處理後的FPS
 
 # 連接到攝影機
 def connect_camera():
@@ -93,10 +103,8 @@ def adjust_exposure(direction):
     
     # 嘗試向ESP32-CAM發送曝光調整請求
     try:
-        # 這裡假設ESP32-CAM有一個調整曝光的API
-        # 實際上需要在ESP32-CAM的代碼中添加這個功能
-        # 這裡只是一個示例，實際上可能需要根據您的ESP32-CAM固件調整
-        exposure_url = f"http://172.16.18.123/control?var=exposure&val={current_exposure}"
+        # 使用ESP32-CAM的曝光控制API
+        exposure_url = f"http://172.16.18.123/setExposure?level={current_exposure}"
         response = requests.get(exposure_url, timeout=1)
         if response.status_code == 200:
             exposure_control_available = True
@@ -110,6 +118,38 @@ def adjust_exposure(direction):
         exposure_control_available = False
         return False
 
+# 更新FPS計算
+def update_fps(is_processing=False):
+    global frame_times, current_fps, processing_fps, last_fps_update
+    
+    current_time = time.time()
+    frame_times.append(current_time)
+    
+    # 只保留最近100幀的時間戳記
+    if len(frame_times) > 100:
+        frame_times = frame_times[-100:]
+    
+    # 每隔fps_update_interval秒更新一次FPS值
+    if current_time - last_fps_update >= fps_update_interval:
+        # 確保至少有2個時間戳記才計算FPS
+        if len(frame_times) >= 2:
+            # 計算FPS: 幀數 / 經過的時間
+            elapsed = frame_times[-1] - frame_times[0]
+            if elapsed > 0:
+                calculated_fps = (len(frame_times) - 1) / elapsed
+                
+                # 根據是否在處理中更新對應的FPS值
+                if is_processing:
+                    processing_fps = calculated_fps
+                else:
+                    current_fps = calculated_fps
+                
+                # 重置時間戳記列表，只保留最後一個
+                last_timestamp = frame_times[-1]
+                frame_times = [last_timestamp]
+                
+                last_fps_update = current_time
+
 # 處理影像的線程函數
 def process_image_thread():
     global display_img, processed_img, person_count, last_detection_time, processing_frame
@@ -117,146 +157,157 @@ def process_image_thread():
     while True:
         if processed_img is not None and not processing_frame and detection_active:
             processing_frame = True
+            process_start_time = time.time()
             
             try:
                 # 複製一份用於處理
                 img_to_process = processed_img.copy()
                 
-                # 創建灰階圖像用於偵測
-                gray = cv.cvtColor(img_to_process, cv.COLOR_BGR2GRAY)
-                
-                # 提高對比度以改善偵測效果
-                clahe = cv.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))  # 增加對比度限制
-                enhanced_gray = clahe.apply(gray)
-                
-                # 應用額外的圖像增強
-                enhanced_img = cv.convertScaleAbs(img_to_process, alpha=1.2, beta=10)  # 增加亮度和對比度
-                
-                # 存儲所有偵測到的人體框
-                all_detections = []
-                
-                # 根據模式選擇偵測方法
-                if detection_mode == 0:  # HOG 偵測
-                    # 修正: 使用更安全的方式處理 HOG 偵測結果
-                    try:
-                        # 使用增強的圖像進行偵測
-                        rects, weights = hog.detectMultiScale(
-                            enhanced_img, 
-                            winStride=(2, 2),  # 進一步減小步長以提高檢測率
-                            padding=detect_padding,
-                            scale=detect_scale_factor
-                        )
-                        
-                        # 檢查是否有偵測結果
-                        if len(rects) > 0:
-                            # 確保 weights 是正確的格式
-                            for i, rect in enumerate(rects):
-                                # 確保索引有效
-                                if i < len(weights):
-                                    # 檢查 weights 的格式
-                                    weight_value = weights[i] if isinstance(weights[i], float) else weights[i][0]
-                                    if weight_value > min_weight_threshold:
-                                        all_detections.append(('person', rect))
-                        
-                        # 如果沒有檢測到，使用更寬鬆的參數再試一次
-                        if len(all_detections) == 0:
-                            rects, weights = hog.detectMultiScale(
-                                enhanced_img, 
-                                winStride=(4, 4),
-                                padding=(32, 32),  # 更大的填充
-                                scale=1.05  # 稍微大一點的縮放因子
-                            )
-                            
-                            if len(rects) > 0:
-                                for i, rect in enumerate(rects):
-                                    if i < len(weights):
-                                        weight_value = weights[i] if isinstance(weights[i], float) else weights[i][0]
-                                        if weight_value > min_weight_threshold * 0.7:  # 使用更低的閾值
-                                            all_detections.append(('person', rect))
-                    except Exception as e:
-                        print(f"HOG detection error: {str(e)}")
-                
-                elif detection_mode == 1:  # 人臉偵測
-                    if not face_cascade.empty():
-                        try:
-                            # 使用增強的灰度圖像進行偵測
-                            faces = face_cascade.detectMultiScale(
-                                enhanced_gray,
-                                scaleFactor=face_scale_factor,
-                                minNeighbors=face_min_neighbors,
-                                minSize=face_min_size
-                            )
-                            
-                            # 確保 faces 是有效的
-                            if len(faces) > 0 and isinstance(faces, np.ndarray):
-                                for face in faces:
-                                    # 擴大人臉框以包含更多身體部分
-                                    x, y, w, h = face
-                                    # 擴大高度為原來的2.5倍，以包含上半身
-                                    expanded_h = int(h * 2.5)
-                                    # 確保不超出圖像邊界
-                                    if y + expanded_h <= img_to_process.shape[0]:
-                                        all_detections.append(('face', (x, y, w, expanded_h)))
-                                    else:
-                                        all_detections.append(('face', face))
-                        except Exception as e:
-                            print(f"Face detection error: {str(e)}")
-                
-                # 如果仍然沒有檢測到任何人，添加一個手動檢測區域（針對紅圈區域）
-                if len(all_detections) == 0:
-                    # 根據紅圈的大致位置添加一個手動檢測框
-                    # 這些值需要根據實際紅圈位置調整
-                    img_height, img_width = img_to_process.shape[:2]
-                    circle_x = int(img_width * 0.7)  # 紅圈大約在圖像右側
-                    circle_y = int(img_height * 0.4)  # 紅圈大約在圖像上半部分
-                    circle_w = int(img_width * 0.3)   # 紅圈寬度約為圖像寬度的30%
-                    circle_h = int(img_height * 0.3)  # 紅圈高度約為圖像高度的30%
-                    
-                    # 檢查紅圈區域的平均亮度
-                    roi = img_to_process[max(0, circle_y-circle_h//2):min(img_height, circle_y+circle_h//2), 
-                                        max(0, circle_x-circle_w//2):min(img_width, circle_x+circle_w//2)]
-                    if roi.size > 0:  # 確保ROI有效
-                        avg_brightness = np.mean(roi)
-                        # 如果亮度超過一定閾值，認為有人
-                        if avg_brightness > 30:  # 亮度閾值可以調整
-                            all_detections.append(('manual', (circle_x-circle_w//2, circle_y-circle_h//2, circle_w, circle_h)))
-                
-                # 在影像上標示人體
-                current_time = time.time()
-                person_detected = len(all_detections) > 0
-                
-                # 如果檢測到人，且與上次檢測時間間隔超過閾值，增加計數
-                if person_detected and (current_time - last_detection_time > detection_timeout):
-                    person_count += 1
-                    last_detection_time = current_time
-                
                 # 創建顯示圖像
                 display_copy = img_to_process.copy()
                 
-                # 繪製人體檢測框
-                for detection_type, (x, y, w, h) in all_detections:
-                    # 畫綠色框框
-                    cv.rectangle(display_copy, (x, y), (x+w, y+h), GREEN, 2)
+                # 如果辨識功能已啟用，進行人體檢測
+                if detection_enabled:
+                    # 創建灰階圖像用於偵測
+                    gray = cv.cvtColor(img_to_process, cv.COLOR_BGR2GRAY)
                     
-                    # 在框框上方標示類型
-                    label = "Person"
-                    if detection_type == 'face':
-                        label = "Person (Face)"
-                    elif detection_type == 'manual':
-                        label = "Person (Manual)"
+                    # 提高對比度以改善偵測效果
+                    clahe = cv.createCLAHE(clipLimit=3.0, tileGridSize=(8,8))  # 增加對比度限制
+                    enhanced_gray = clahe.apply(gray)
+                    
+                    # 應用額外的圖像增強
+                    enhanced_img = cv.convertScaleAbs(img_to_process, alpha=1.2, beta=10)  # 增加亮度和對比度
+                    
+                    # 存儲所有偵測到的人體框
+                    all_detections = []
+                    
+                    # 根據模式選擇偵測方法
+                    if detection_mode == 0:  # HOG 偵測
+                        # 修正: 使用更安全的方式處理 HOG 偵測結果
+                        try:
+                            # 使用增強的圖像進行偵測
+                            rects, weights = hog.detectMultiScale(
+                                enhanced_img, 
+                                winStride=(2, 2),  # 進一步減小步長以提高檢測率
+                                padding=detect_padding,
+                                scale=detect_scale_factor
+                            )
+                            
+                            # 檢查是否有偵測結果
+                            if len(rects) > 0:
+                                # 確保 weights 是正確的格式
+                                for i, rect in enumerate(rects):
+                                    # 確保索引有效
+                                    if i < len(weights):
+                                        # 檢查 weights 的格式
+                                        weight_value = weights[i] if isinstance(weights[i], float) else weights[i][0]
+                                        if weight_value > min_weight_threshold:
+                                            all_detections.append(('person', rect))
+                            
+                            # 如果沒有檢測到，使用更寬鬆的參數再試一次
+                            if len(all_detections) == 0:
+                                rects, weights = hog.detectMultiScale(
+                                    enhanced_img, 
+                                    winStride=(4, 4),
+                                    padding=(32, 32),  # 更大的填充
+                                    scale=1.05  # 稍微大一點的縮放因子
+                                )
+                                
+                                if len(rects) > 0:
+                                    for i, rect in enumerate(rects):
+                                        if i < len(weights):
+                                            weight_value = weights[i] if isinstance(weights[i], float) else weights[i][0]
+                                            if weight_value > min_weight_threshold * 0.7:  # 使用更低的閾值
+                                                all_detections.append(('person', rect))
+                        except Exception as e:
+                            print(f"HOG detection error: {str(e)}")
+                    
+                    elif detection_mode == 1:  # 人臉偵測
+                        if not face_cascade.empty():
+                            try:
+                                # 使用增強的灰度圖像進行偵測
+                                faces = face_cascade.detectMultiScale(
+                                    enhanced_gray,
+                                    scaleFactor=face_scale_factor,
+                                    minNeighbors=face_min_neighbors,
+                                    minSize=face_min_size
+                                )
+                                
+                                # 確保 faces 是有效的
+                                if len(faces) > 0 and isinstance(faces, np.ndarray):
+                                    for face in faces:
+                                        # 擴大人臉框以包含更多身體部分
+                                        x, y, w, h = face
+                                        # 擴大高度為原來的2.5倍，以包含上半身
+                                        expanded_h = int(h * 2.5)
+                                        # 確保不超出圖像邊界
+                                        if y + expanded_h <= img_to_process.shape[0]:
+                                            all_detections.append(('face', (x, y, w, expanded_h)))
+                                        else:
+                                            all_detections.append(('face', face))
+                            except Exception as e:
+                                print(f"Face detection error: {str(e)}")
+                    
+                    # 如果仍然沒有檢測到任何人，添加一個手動檢測區域（針對紅圈區域）
+                    if len(all_detections) == 0:
+                        # 根據紅圈的大致位置添加一個手動檢測框
+                        # 這些值需要根據實際紅圈位置調整
+                        img_height, img_width = img_to_process.shape[:2]
+                        circle_x = int(img_width * 0.7)  # 紅圈大約在圖像右側
+                        circle_y = int(img_height * 0.4)  # 紅圈大約在圖像上半部分
+                        circle_w = int(img_width * 0.3)   # 紅圈寬度約為圖像寬度的30%
+                        circle_h = int(img_height * 0.3)  # 紅圈高度約為圖像高度的30%
                         
-                    cv.putText(display_copy, label, (x, y-10), 
-                              cv.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 2)
-                
-                # 顯示當前設定和人數 (使用綠色文字)
-                cv.putText(display_copy, f"Total Count: {person_count}", 
-                          (10, 25), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
-                cv.putText(display_copy, f"Sensitivity: {min_weight_threshold:.2f}", 
-                          (10, 50), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
-                cv.putText(display_copy, f"Current Frame: {len(all_detections)} people", 
-                          (10, 75), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
-                cv.putText(display_copy, f"Mode: {mode_names[detection_mode]}", 
-                          (10, 100), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
+                        # 檢查紅圈區域的平均亮度
+                        roi = img_to_process[max(0, circle_y-circle_h//2):min(img_height, circle_y+circle_h//2), 
+                                            max(0, circle_x-circle_w//2):min(img_width, circle_x+circle_w//2)]
+                        if roi.size > 0:  # 確保ROI有效
+                            avg_brightness = np.mean(roi)
+                            # 如果亮度超過一定閾值，認為有人
+                            if avg_brightness > 30:  # 亮度閾值可以調整
+                                all_detections.append(('manual', (circle_x-circle_w//2, circle_y-circle_h//2, circle_w, circle_h)))
+                    
+                    # 在影像上標示人體
+                    current_time = time.time()
+                    person_detected = len(all_detections) > 0
+                    
+                    # 如果檢測到人，且與上次檢測時間間隔超過閾值，增加計數
+                    if person_detected and (current_time - last_detection_time > detection_timeout):
+                        person_count += 1
+                        last_detection_time = current_time
+                    
+                    # 繪製人體檢測框
+                    for detection_type, (x, y, w, h) in all_detections:
+                        # 畫綠色框框
+                        cv.rectangle(display_copy, (x, y), (x+w, y+h), GREEN, 2)
+                        
+                        # 在框框上方標示類型
+                        label = "Person"
+                        if detection_type == 'face':
+                            label = "Person (Face)"
+                        elif detection_type == 'manual':
+                            label = "Person (Manual)"
+                            
+                        cv.putText(display_copy, label, (x, y-10), 
+                                  cv.FONT_HERSHEY_SIMPLEX, 0.5, GREEN, 2)
+                    
+                    # 顯示當前設定和人數 (使用綠色文字)
+                    cv.putText(display_copy, f"Total Count: {person_count}", 
+                              (10, 25), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
+                    cv.putText(display_copy, f"Sensitivity: {min_weight_threshold:.2f}", 
+                              (10, 50), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
+                    cv.putText(display_copy, f"Current Frame: {len(all_detections)} people", 
+                              (10, 75), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
+                    cv.putText(display_copy, f"Mode: {mode_names[detection_mode]}", 
+                              (10, 100), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
+                else:
+                    # 如果辨識功能已關閉，顯示提示信息
+                    cv.putText(display_copy, "Detection DISABLED", 
+                              (10, 25), cv.FONT_HERSHEY_SIMPLEX, 0.8, ALERT_COLOR, 2)
+                    cv.putText(display_copy, "Press 'x' to enable detection", 
+                              (10, 50), cv.FONT_HERSHEY_SIMPLEX, 0.6, ALERT_COLOR, 2)
+                    cv.putText(display_copy, f"Total Count: {person_count}", 
+                              (10, 75), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
                 
                 # 顯示曝光設定
                 exposure_text = exposure_levels.get(current_exposure, "未知")
@@ -265,8 +316,22 @@ def process_image_thread():
                 cv.putText(display_copy, f"Exposure: {exposure_text}", 
                           (10, 125), cv.FONT_HERSHEY_SIMPLEX, 0.6, TEXT_COLOR, 2)
                 
+                # 顯示FPS信息 (使用橙色文字)
+                cv.putText(display_copy, f"Raw FPS: {current_fps:.1f}", 
+                          (10, 150), cv.FONT_HERSHEY_SIMPLEX, 0.6, FPS_COLOR, 2)
+                cv.putText(display_copy, f"Processing FPS: {processing_fps:.1f}", 
+                          (10, 175), cv.FONT_HERSHEY_SIMPLEX, 0.6, FPS_COLOR, 2)
+                
+                # 計算處理時間
+                process_time = time.time() - process_start_time
+                cv.putText(display_copy, f"Process Time: {process_time*1000:.1f} ms", 
+                          (10, 200), cv.FONT_HERSHEY_SIMPLEX, 0.6, FPS_COLOR, 2)
+                
                 # 更新顯示圖像
                 display_img = display_copy
+                
+                # 更新處理FPS
+                update_fps(is_processing=True)
             
             except Exception as e:
                 print(f"Error in image processing: {str(e)}")
@@ -288,7 +353,7 @@ processing_thread.start()
 
 # 檢查曝光控制是否可用
 try:
-    test_url = "http://172.16.18.123/control?var=exposure&val=0"
+    test_url = "http://172.16.18.123/setExposure?level=0"
     response = requests.get(test_url, timeout=1)
     if response.status_code == 200:
         exposure_control_available = True
@@ -302,7 +367,8 @@ except Exception as e:
 
 print("按 'a' 拍照存檔")
 print("按 'm' 切換偵測模式")
-print("按 'd' 開關偵測功能")
+print("按 'd' 開關偵測功能 (暫停/繼續)")
+print("按 'x' 開關辨識功能 (完全關閉/開啟辨識)")
 print("按 '+' 增加偵測靈敏度")
 print("按 '-' 減少偵測靈敏度")
 print("按 'r' 重置人數計數")
@@ -338,6 +404,9 @@ while True:
                     img = cv.imdecode(np.frombuffer(bmp_data, dtype=np.uint8), cv.IMREAD_COLOR)
                     
                     if img is not None:
+                        # 更新原始FPS
+                        update_fps(is_processing=False)
+                        
                         # 調整大小
                         img = cv.resize(img, (640, 480))
                         
@@ -384,11 +453,17 @@ while True:
         detection_mode = (detection_mode + 1) % 2
         print(f"Switched to mode: {mode_names[detection_mode]}")
     
-    # 按d開關偵測功能
+    # 按d開關偵測功能 (暫停/繼續)
     elif k & 0xFF == ord('d'):
         detection_active = not detection_active
         status = "enabled" if detection_active else "disabled"
-        print(f"Detection {status}")
+        print(f"Detection processing {status} (paused/resumed)")
+    
+    # 按x開關辨識功能 (完全關閉/開啟辨識)
+    elif k & 0xFF == ord('x'):
+        detection_enabled = not detection_enabled
+        status = "enabled" if detection_enabled else "disabled"
+        print(f"Detection feature {status} (completely on/off)")
     
     # 按+增加偵測靈敏度（減少權重閾值）
     elif k & 0xFF == ord('+') or k & 0xFF == ord('='):
